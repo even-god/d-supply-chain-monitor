@@ -238,7 +238,13 @@ def diff_package(package: str, old_version: str, new_version: str) -> tuple[str 
         return None, None
 
 
-def analyze_report(report: str, package: str, new_version: str) -> tuple[str, str]:
+def analyze_report(
+    report: str,
+    package: str,
+    new_version: str,
+    *,
+    model: str | None = None,
+) -> tuple[str, str]:
     """Write report to a temp workspace, run Cursor Agent, return (verdict, analysis)."""
     safe_name = package.replace("/", "_").replace("@", "")
     workspace = Path(tempfile.mkdtemp(prefix=f"scm_analyze_{safe_name}_"))
@@ -246,7 +252,7 @@ def analyze_report(report: str, package: str, new_version: str) -> tuple[str, st
     diff_file.write_text(report, encoding="utf-8")
     log.info("Diff written to %s", diff_file)
     try:
-        raw_output = run_cursor_agent(diff_file)
+        raw_output = run_cursor_agent(diff_file, model=model or "composer-2-fast")
         verdict, analysis = parse_verdict(raw_output)
     except Exception:
         log.error("Analysis failed for %s %s:\n%s", package, new_version, traceback.format_exc())
@@ -501,7 +507,12 @@ def npm_diff_package(
 
 
 def process_npm_release(
-    package: str, new_version: str, rank: int, slack: bool = False
+    package: str,
+    new_version: str,
+    rank: int,
+    slack: bool = False,
+    *,
+    model: str | None = None,
 ) -> str:
     """Full pipeline for one npm release: diff -> analyze -> alert. Returns verdict."""
     log.info("[npm] Processing %s %s (rank #%s)...", package, new_version, f"{rank:,}")
@@ -518,7 +529,7 @@ def process_npm_release(
 
     try:
         log.info("[npm] Analyzing diff for %s...", package)
-        verdict, analysis = analyze_report(report, package, new_version)
+        verdict, analysis = analyze_report(report, package, new_version, model=model)
         log.info("[npm] Verdict for %s %s: %s", package, new_version, verdict.upper())
 
         if verdict == "malicious":
@@ -553,7 +564,14 @@ def extract_new_releases(events: list, watchlist: dict[str, int]) -> list[tuple[
     return releases
 
 
-def process_release(package: str, new_version: str, rank: int, slack: bool = False) -> str:
+def process_release(
+    package: str,
+    new_version: str,
+    rank: int,
+    slack: bool = False,
+    *,
+    model: str | None = None,
+) -> str:
     """Full pipeline for one release: diff -> analyze -> alert. Returns verdict."""
     log.info("[pypi] Processing %s %s (rank #%s)...", package, new_version, f"{rank:,}")
 
@@ -569,7 +587,7 @@ def process_release(package: str, new_version: str, rank: int, slack: bool = Fal
 
     try:
         log.info("[pypi] Analyzing diff for %s...", package)
-        verdict, analysis = analyze_report(report, package, new_version)
+        verdict, analysis = analyze_report(report, package, new_version, model=model)
         log.info("[pypi] Verdict for %s %s: %s", package, new_version, verdict.upper())
 
         if verdict == "malicious":
@@ -588,6 +606,7 @@ def poll_loop(
     *,
     initial_serial: int | None = None,
     state_path: Path | None = None,
+    model: str | None = None,
 ):
     state_path = state_path or LAST_SERIAL_PATH
     client = xmlrpc.client.ServerProxy(PYPI_XMLRPC)
@@ -640,7 +659,9 @@ def poll_loop(
 
             for package, version, ts in releases:
                 rank = watchlist.get(package.lower(), 0)
-                verdict = process_release(package, version, rank, slack=slack)
+                verdict = process_release(
+                    package, version, rank, slack=slack, model=model,
+                )
                 stats["checked"] += 1
                 stats[verdict] = stats.get(verdict, 0) + 1
                 log.info("[pypi] Stats: %s", stats)
@@ -653,13 +674,26 @@ def poll_loop(
         log.info("[pypi] Stopped. Last serial: %s | Stats: %s", f"{serial:,}", stats)
 
 
-def run_once(watchlist: dict[str, int], slack: bool = False, lookback_seconds: int = 600):
+def run_once(
+    watchlist: dict[str, int],
+    slack: bool = False,
+    lookback_seconds: int = 600,
+    *,
+    since_serial: int | None = None,
+    model: str | None = None,
+):
     client = xmlrpc.client.ServerProxy(PYPI_XMLRPC)
     current_serial = client.changelog_last_serial()
-    estimated_start = max(0, current_serial - lookback_seconds * 15)
-
-    log.info("[pypi] One-shot: checking events from serial %s to %s (~last %s min)",
-             f"{estimated_start:,}", f"{current_serial:,}", lookback_seconds // 60)
+    if since_serial is not None:
+        estimated_start = max(0, since_serial)
+        log.info(
+            "[pypi] One-shot: checking events from serial %s to %s (from --serial)",
+            f"{estimated_start:,}", f"{current_serial:,}",
+        )
+    else:
+        estimated_start = max(0, current_serial - lookback_seconds * 15)
+        log.info("[pypi] One-shot: checking events from serial %s to %s (~last %s min)",
+                 f"{estimated_start:,}", f"{current_serial:,}", lookback_seconds // 60)
 
     events = client.changelog_since_serial(estimated_start)
     if not events:
@@ -671,7 +705,7 @@ def run_once(watchlist: dict[str, int], slack: bool = False, lookback_seconds: i
 
     for package, version, ts in releases:
         rank = watchlist.get(package.lower(), 0)
-        process_release(package, version, rank, slack=slack)
+        process_release(package, version, rank, slack=slack, model=model)
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +719,7 @@ def npm_poll_loop(
     *,
     initial_seq: int | None = None,
     state_path: Path | None = None,
+    model: str | None = None,
 ):
     state_path = state_path or LAST_SERIAL_PATH
 
@@ -762,7 +797,9 @@ def npm_poll_loop(
 
             for pkg, version in releases:
                 rank = watchlist.get(pkg.lower(), 0)
-                verdict = process_npm_release(pkg, version, rank, slack=slack)
+                verdict = process_npm_release(
+                    pkg, version, rank, slack=slack, model=model,
+                )
                 stats["checked"] += 1
                 stats[verdict] = stats.get(verdict, 0) + 1
                 log.info("[npm] Stats: %s", stats)
@@ -779,6 +816,8 @@ def npm_run_once(
     watchlist: dict[str, int],
     slack: bool = False,
     lookback_seconds: int = 600,
+    *,
+    model: str | None = None,
 ):
     """One-shot: check for npm releases published in the last *lookback_seconds*."""
     cutoff_epoch = time.time() - lookback_seconds
@@ -816,7 +855,7 @@ def npm_run_once(
 
     for pkg, version in releases:
         rank = watchlist.get(pkg.lower(), 0)
-        process_npm_release(pkg, version, rank, slack=slack)
+        process_npm_release(pkg, version, rank, slack=slack, model=model)
 
 
 # ---------------------------------------------------------------------------
@@ -835,7 +874,7 @@ def main():
     pypi_group = parser.add_argument_group("PyPI options")
     pypi_group.add_argument("--no-pypi", action="store_true", help="Disable PyPI monitoring")
     pypi_group.add_argument("--serial", type=int, default=None, metavar="N",
-                            help="PyPI changelog serial to start from")
+                            help="PyPI changelog start serial (poll mode and --once)")
 
     npm_group = parser.add_argument_group("npm options")
     npm_group.add_argument("--no-npm", action="store_true", help="Disable npm monitoring")
@@ -858,11 +897,16 @@ def main():
     if args.once:
         if enable_pypi:
             pypi_watchlist = load_watchlist(args.top)
-            run_once(pypi_watchlist, slack=args.slack)
+            run_once(
+                pypi_watchlist,
+                slack=args.slack,
+                since_serial=args.serial,
+                model=args.model,
+            )
         if enable_npm:
             npm_top = args.npm_top or args.top
             npm_watchlist = load_npm_watchlist(npm_top)
-            npm_run_once(npm_watchlist, slack=args.slack)
+            npm_run_once(npm_watchlist, slack=args.slack, model=args.model)
     else:
         threads: list[threading.Thread] = []
 
@@ -871,7 +915,11 @@ def main():
             t = threading.Thread(
                 target=poll_loop,
                 args=(pypi_watchlist, args.interval),
-                kwargs={"slack": args.slack, "initial_serial": args.serial},
+                kwargs={
+                    "slack": args.slack,
+                    "initial_serial": args.serial,
+                    "model": args.model,
+                },
                 daemon=True,
                 name="pypi-poll",
             )
@@ -883,7 +931,11 @@ def main():
             t = threading.Thread(
                 target=npm_poll_loop,
                 args=(npm_watchlist, args.interval),
-                kwargs={"slack": args.slack, "initial_seq": args.npm_seq},
+                kwargs={
+                    "slack": args.slack,
+                    "initial_seq": args.npm_seq,
+                    "model": args.model,
+                },
                 daemon=True,
                 name="npm-poll",
             )
