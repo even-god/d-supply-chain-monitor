@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -25,6 +26,7 @@ import tarfile
 import tempfile
 import urllib.request
 import zipfile
+import zlib
 from pathlib import Path
 
 PYPI_VERSION_URL = "https://pypi.org/pypi/{package}/{version}/json"
@@ -148,13 +150,29 @@ def _safe_zip_members(zf: zipfile.ZipFile, dest: Path):
         yield info
 
 
+def _gzip_decompress(path: Path) -> bytes:
+    """Decompress a gzip file as raw bytes.
+
+    Uses :mod:`zlib` instead of :class:`gzip.GzipFile` so extraction is not
+    affected by CPython 3.9's ``gzip._PaddedFile`` bug (``int`` + ``bytes``
+    TypeError) seen on some PyPI ``.tar.gz`` sdists when using ``tarfile.open``
+    with ``r:gz``.
+    """
+    data = path.read_bytes()
+    try:
+        return zlib.decompress(data, wbits=zlib.MAX_WBITS | 16)
+    except zlib.error as e:
+        raise RuntimeError(f"Failed to gzip-decompress {path.name}: {e}") from e
+
+
 def extract_archive(archive: Path, dest: Path) -> Path:
     """Extract a .tar.gz, .zip, or .whl archive and return the root folder."""
     dest.mkdir(parents=True, exist_ok=True)
     name = archive.name.lower()
 
     if name.endswith((".tar.gz", ".tgz")):
-        with tarfile.open(archive, "r:gz") as tf:
+        raw_tar = _gzip_decompress(archive)
+        with tarfile.open(fileobj=io.BytesIO(raw_tar), mode="r:") as tf:
             tf.extractall(dest, members=list(_safe_tar_members(tf, dest)))
     elif name.endswith(".tar.bz2"):
         with tarfile.open(archive, "r:bz2") as tf:

@@ -286,8 +286,7 @@ Verdict: MALICIOUS
 npm: https://www.npmjs.com/package/axios/v/0.30.4
 
 Analysis summary (truncated):
-The new bin/ssl_hotfix.js contains obfuscated code that downloads
-and executes a remote payload on postinstall...
+1. **Non-standard dependency** — The `dependencies` block includes `plain-crypto-js`. Published axios only depends on `follow-redirects`, `form-data`, and `proxy-from-env`. A fourth package whose name looks like a **`crypto-js`–style typosquat** is a classic sign of a tampered or fake package, not a normal axios release.
 ```
 
 ## Limitations
