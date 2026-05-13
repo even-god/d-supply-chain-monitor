@@ -2,7 +2,8 @@
 # Licensed under the MIT License. See LICENSE file in the project root for details.
 
 """
-Analyze a package diff report for supply chain compromise using Cursor Agent CLI.
+Analyze a package diff report for supply chain compromise using Cursor Agent CLI
+or Claude Code CLI.
 
 Takes a diff markdown file (output of package_diff.py) and returns a verdict
 of "malicious" or "benign" with supporting analysis.
@@ -10,7 +11,7 @@ of "malicious" or "benign" with supporting analysis.
 Usage:
     python analyze_diff.py <diff_file>
     python analyze_diff.py telnyx_diff.md
-    python analyze_diff.py telnyx_diff.md --model claude-4-opus
+    python analyze_diff.py telnyx_diff.md --model claude-sonnet-4-6 --analyzer claude-code
     python analyze_diff.py telnyx_diff.md --json
 
 Can also be chained with package_diff.py:
@@ -77,15 +78,26 @@ def _find_agent() -> str:
     )
 
 
+def _find_claude_code() -> str:
+    cc = shutil.which("claude")
+    if cc:
+        return cc
+    raise FileNotFoundError(
+        "Claude Code CLI not found. Install from https://claude.ai/code"
+    )
+
+
+def _write_instructions(workspace: Path, diff_file_name: str) -> None:
+    (workspace / "instructions.md").write_text(
+        INSTRUCTIONS_TEMPLATE.format(diff_file=diff_file_name),
+        encoding="utf-8",
+    )
+
+
 def run_cursor_agent(diff_file: Path, model: str = "composer-2-fast") -> str:
     agent_bin = _find_agent()
     workspace = diff_file.parent.resolve()
-
-    instructions = workspace / "instructions.md"
-    instructions.write_text(
-        INSTRUCTIONS_TEMPLATE.format(diff_file=diff_file.name),
-        encoding="utf-8",
-    )
+    _write_instructions(workspace, diff_file.name)
 
     cmd_parts = [
         agent_bin,
@@ -117,8 +129,45 @@ def run_cursor_agent(diff_file: Path, model: str = "composer-2-fast") -> str:
     return result.stdout or ""
 
 
+def run_claude_code(diff_file: Path, model: str | None = None) -> str:
+    claude_bin = _find_claude_code()
+    workspace = diff_file.parent.resolve()
+    _write_instructions(workspace, diff_file.name)
+
+    cmd_parts = [claude_bin, "-p", "Follow instructions.md"]
+    if model:
+        cmd_parts.extend(["--model", model])
+
+    result = subprocess.run(
+        cmd_parts,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300,
+        cwd=str(workspace),
+    )
+
+    log.debug("Claude Code stdout:\n%s", result.stdout or "(empty)")
+    log.debug("Claude Code stderr:\n%s", result.stderr or "(empty)")
+
+    if result.returncode != 0:
+        log.error("Claude Code exited %d: %s", result.returncode, result.stderr)
+        return ""
+
+    return result.stdout or ""
+
+
+def run_analyzer(
+    diff_file: Path, analyzer: str = "cursor", model: str | None = None
+) -> str:
+    if analyzer == "claude-code":
+        return run_claude_code(diff_file, model=model)
+    return run_cursor_agent(diff_file, model=model or "composer-2-fast")
+
+
 def parse_verdict(output: str) -> tuple[str, str]:
-    """Extract verdict and reasoning from cursor output."""
+    """Extract verdict and reasoning from analyzer output."""
     verdict = "unknown"
     match = re.search(r"[Vv]erdict:\s*(malicious|benign)", output, re.IGNORECASE)
     if match:
@@ -128,19 +177,23 @@ def parse_verdict(output: str) -> tuple[str, str]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Analyze a package diff for supply chain compromise via Cursor Agent",
+        description="Analyze a package diff for supply chain compromise via Cursor Agent or Claude Code",
     )
     parser.add_argument("diff_file", type=Path, help="Path to diff markdown file (from package_diff.py)")
-    parser.add_argument("--model", help="Model to use (default: composer-2-fast)")
+    parser.add_argument("--model", help="Model to use (cursor default: composer-2-fast)")
+    parser.add_argument(
+        "--analyzer", choices=["cursor", "claude-code"], default="cursor",
+        help="LLM backend to use for analysis (default: cursor)",
+    )
     parser.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON")
     args = parser.parse_args()
 
     if not args.diff_file.exists():
         parser.error(f"File not found: {args.diff_file}")
 
-    print(f"[*] Analyzing {args.diff_file.name} with Cursor Agent...", file=sys.stderr)
+    print(f"[*] Analyzing {args.diff_file.name} with {args.analyzer}...", file=sys.stderr)
 
-    raw_output = run_cursor_agent(args.diff_file, model=args.model)
+    raw_output = run_analyzer(args.diff_file, analyzer=args.analyzer, model=args.model)
     verdict, analysis = parse_verdict(raw_output)
 
     if args.json_output:
