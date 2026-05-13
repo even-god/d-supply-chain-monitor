@@ -103,7 +103,9 @@ The monitor invokes Claude Code in headless `-p` mode with `--tools "Read,Grep,G
 
 ### Slack Configuration
 
-Place your Slack bot token in `etc/slack.json`:
+See **[docs/slack-setup.md](docs/slack-setup.md)** for the full step-by-step guide (create app, add scopes, get credentials, test).
+
+In short: create `etc/slack.json` (gitignored):
 
 ```json
 {
@@ -113,7 +115,7 @@ Place your Slack bot token in `etc/slack.json`:
 }
 ```
 
-The bot needs `chat:write` scope on the target channel. The `channel` field is the Slack channel ID where alerts are posted.
+Then pass `--slack` when running the monitor to enable alerts. Without `--slack`, malicious findings are logged but no Slack message is sent.
 
 ## Quick Start
 
