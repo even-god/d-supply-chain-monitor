@@ -38,7 +38,7 @@ import xmlrpc.client
 from datetime import datetime, timezone
 from pathlib import Path
 
-from analyze_diff import parse_verdict, run_analyzer
+from analyze_diff import ANALYZERS, parse_verdict, run_analyzer
 from package_diff import (
     collect_files,
     download_npm_package,
@@ -880,7 +880,7 @@ def main():
     parser.add_argument("--slack", action="store_true", help="Enable Slack alerts for malicious findings")
     parser.add_argument("--model", help="Override model for analysis")
     parser.add_argument(
-        "--analyzer", choices=["cursor", "claude-code"], default="cursor",
+        "--analyzer", choices=sorted(ANALYZERS), default="cursor",
         help="LLM backend to use for analysis (default: cursor)",
     )
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG logging (includes agent raw output)")

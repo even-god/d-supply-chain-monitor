@@ -28,7 +28,9 @@ import re
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 log = logging.getLogger("monitor.analyze")
 
@@ -101,83 +103,107 @@ def _write_instructions(workspace: Path, diff_file_name: str) -> None:
     )
 
 
-def run_cursor_agent(diff_file: Path, model: str = "composer-2-fast") -> str:
-    agent_bin = _find_agent()
-    workspace = diff_file.parent.resolve()
-    _write_instructions(workspace, diff_file.name)
+@dataclass(frozen=True)
+class Analyzer:
+    """Definition of an LLM analyzer backend.
 
-    cmd_parts = [
-        agent_bin,
+    ``build_command`` returns the argv to execute. It is responsible for
+    enforcing read-only access — the diff under review may contain adversarial
+    code, so no Bash/Edit/Write/network tools should be granted. The subprocess
+    is always run with ``cwd=workspace`` (the diff's parent directory).
+
+    See ``docs/custom-analyzer.md`` for the full integration guide.
+    """
+    name: str
+    find_binary: Callable[[], str]
+    build_command: Callable[[str, Path, "str | None"], list[str]]
+    default_model: "str | None" = None
+    timeout: int = 300
+
+
+def _build_cursor_cmd(binary: str, diff_file: Path, model: "str | None") -> list[str]:
+    # Read-only via `--mode ask --trust` (ask mode disallows edits).
+    cmd = [
+        binary,
         "Follow instructions.md",
         "-p",
         "--mode", "ask",
         "--trust",
-        "--workspace", str(workspace),
+        "--workspace", str(diff_file.parent.resolve()),
     ]
     if model:
-        cmd_parts.extend(["--model", model])
-
-    result = subprocess.run(
-        cmd_parts,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=300,
-    )
-
-    log.debug("Agent stdout:\n%s", result.stdout or "(empty)")
-    log.debug("Agent stderr:\n%s", result.stderr or "(empty)")
-
-    if result.returncode != 0:
-        log.error("Cursor agent exited %d: %s", result.returncode, result.stderr)
-        return ""
-
-    return result.stdout or ""
+        cmd.extend(["--model", model])
+    return cmd
 
 
-def run_claude_code(diff_file: Path, model: str | None = None) -> str:
-    claude_bin = _find_claude_code()
-    workspace = diff_file.parent.resolve()
-    _write_instructions(workspace, diff_file.name)
-
-    # Restrict the agent to read-only tools — the diff under review may contain
-    # adversarial code, so no Bash/Edit/Write/etc. is permitted.
-    cmd_parts = [
-        claude_bin,
+def _build_claude_code_cmd(binary: str, diff_file: Path, model: "str | None") -> list[str]:
+    # Read-only via `--tools "Read,Grep,Glob"` (no Bash/Edit/Write) plus
+    # `--permission-mode plan` (blocks side effects). Both flags are load-bearing.
+    cmd = [
+        binary,
         "-p", "Follow instructions.md",
         "--tools", "Read,Grep,Glob",
         "--permission-mode", "plan",
     ]
     if model:
-        cmd_parts.extend(["--model", model])
+        cmd.extend(["--model", model])
+    return cmd
+
+
+ANALYZERS: dict[str, Analyzer] = {
+    "cursor": Analyzer(
+        name="cursor",
+        find_binary=_find_agent,
+        build_command=_build_cursor_cmd,
+        default_model="composer-2-fast",
+    ),
+    "claude-code": Analyzer(
+        name="claude-code",
+        find_binary=_find_claude_code,
+        build_command=_build_claude_code_cmd,
+        default_model=None,
+    ),
+}
+
+
+def run_analyzer(
+    diff_file: Path, analyzer: str = "cursor", model: "str | None" = None
+) -> str:
+    """Dispatch to the analyzer registered under *analyzer* and return stdout.
+
+    Returns the empty string on non-zero exit (treated as ``verdict=unknown``
+    by ``parse_verdict``).
+    """
+    if analyzer not in ANALYZERS:
+        raise ValueError(
+            f"Unknown analyzer: {analyzer!r}. Available: {sorted(ANALYZERS)}"
+        )
+    spec = ANALYZERS[analyzer]
+    binary = spec.find_binary()
+    workspace = diff_file.parent.resolve()
+    _write_instructions(workspace, diff_file.name)
+
+    effective_model = model or spec.default_model
+    cmd = spec.build_command(binary, diff_file, effective_model)
 
     result = subprocess.run(
-        cmd_parts,
+        cmd,
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=300,
+        timeout=spec.timeout,
         cwd=str(workspace),
     )
 
-    log.debug("Claude Code stdout:\n%s", result.stdout or "(empty)")
-    log.debug("Claude Code stderr:\n%s", result.stderr or "(empty)")
+    log.debug("%s stdout:\n%s", spec.name, result.stdout or "(empty)")
+    log.debug("%s stderr:\n%s", spec.name, result.stderr or "(empty)")
 
     if result.returncode != 0:
-        log.error("Claude Code exited %d: %s", result.returncode, result.stderr)
+        log.error("%s exited %d: %s", spec.name, result.returncode, result.stderr)
         return ""
 
     return result.stdout or ""
-
-
-def run_analyzer(
-    diff_file: Path, analyzer: str = "cursor", model: str | None = None
-) -> str:
-    if analyzer == "claude-code":
-        return run_claude_code(diff_file, model=model)
-    return run_cursor_agent(diff_file, model=model or "composer-2-fast")
 
 
 def parse_verdict(output: str) -> tuple[str, str]:
@@ -196,7 +222,7 @@ def main():
     parser.add_argument("diff_file", type=Path, help="Path to diff markdown file (from package_diff.py)")
     parser.add_argument("--model", help="Model to use (cursor default: composer-2-fast)")
     parser.add_argument(
-        "--analyzer", choices=["cursor", "claude-code"], default="cursor",
+        "--analyzer", choices=sorted(ANALYZERS), default="cursor",
         help="LLM backend to use for analysis (default: cursor)",
     )
     parser.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON")

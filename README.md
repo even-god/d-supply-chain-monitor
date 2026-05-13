@@ -101,6 +101,12 @@ claude --version
 
 The monitor invokes Claude Code in headless `-p` mode with `--tools "Read,Grep,Glob"` and `--permission-mode plan`, so the agent has no ability to execute Bash or write files in the analysis workspace.
 
+### Adding a Custom Analyzer Backend
+
+Want to plug in OpenCode, Aider, Gemini CLI, a local Ollama wrapper, or something you wrote yourself? See **[docs/custom-analyzer.md](docs/custom-analyzer.md)** for the integration guide — covers the `Analyzer` registry pattern, the (non-negotiable) read-only safety contract, a worked example, and a pre-PR checklist.
+
+In short: drop one entry into `ANALYZERS` in `analyze_diff.py` and both `monitor.py --analyzer <yours>` and `analyze_diff.py --analyzer <yours>` pick it up automatically.
+
 ### Slack Configuration
 
 See **[docs/slack-setup.md](docs/slack-setup.md)** for the full step-by-step guide (create app, add scopes, get credentials, test).
