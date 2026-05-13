@@ -82,6 +82,13 @@ def _find_claude_code() -> str:
     cc = shutil.which("claude")
     if cc:
         return cc
+    if platform.system() == "Windows":
+        for candidate in (
+            Path.home() / ".local/bin/claude.exe",
+            Path.home() / "AppData/Roaming/npm/claude.cmd",
+        ):
+            if candidate.exists():
+                return str(candidate)
     raise FileNotFoundError(
         "Claude Code CLI not found. Install from https://claude.ai/code"
     )
@@ -134,7 +141,14 @@ def run_claude_code(diff_file: Path, model: str | None = None) -> str:
     workspace = diff_file.parent.resolve()
     _write_instructions(workspace, diff_file.name)
 
-    cmd_parts = [claude_bin, "-p", "Follow instructions.md"]
+    # Restrict the agent to read-only tools — the diff under review may contain
+    # adversarial code, so no Bash/Edit/Write/etc. is permitted.
+    cmd_parts = [
+        claude_bin,
+        "-p", "Follow instructions.md",
+        "--tools", "Read,Grep,Glob",
+        "--permission-mode", "plan",
+    ]
     if model:
         cmd_parts.extend(["--model", model])
 

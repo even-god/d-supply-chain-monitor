@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Automated monitoring of the top **PyPI** and **npm** packages for supply chain compromise. Polls both registries for new releases, diffs each release against its predecessor, and uses an LLM (via [Cursor Agent CLI](https://cursor.com/docs/cli/overview)) to classify diffs as **benign** or **malicious**. Malicious findings trigger a Slack alert.
+Automated monitoring of the top **PyPI** and **npm** packages for supply chain compromise. Polls both registries for new releases, diffs each release against its predecessor, and uses an LLM (via [Cursor Agent CLI](https://cursor.com/docs/cli/overview) or [Claude Code CLI](https://claude.ai/code), selectable with `--analyzer`) to classify diffs as **benign** or **malicious**. Malicious findings trigger a Slack alert.
 
 Both ecosystems are monitored by default. Use `--no-pypi` or `--no-npm` to disable one.
 
@@ -40,7 +40,8 @@ Each ecosystem runs its own polling thread but shares the analysis and alerting 
                                            ▼
                                    ┌───────────────┐  ◄── LLM analysis
                                    │ Cursor Agent  │      (read-only)
-                                   │ CLI (ask mode)│
+                                   │  OR Claude    │      --analyzer flag
+                                   │  Code CLI     │
                                    └───────┬───────┘
                                            │
                                        verdict?
@@ -67,9 +68,11 @@ The LLM analysis is prompted to look for:
 ## Prerequisites
 
 - **Python 3.9+** — install runtime dependencies with `pip install -r requirements.txt` (stdlib covers most of the tool; `requests` is used for Slack uploads)
-- **Cursor Agent CLI** — the standalone `agent` binary, not the IDE
+- **One analyzer backend** — either Cursor Agent CLI (default) or Claude Code CLI
 
 ### Installing Cursor Agent CLI
+
+The standalone `agent` binary, not the IDE.
 
 **Windows (PowerShell):**
 ```powershell
@@ -87,6 +90,16 @@ agent --version
 ```
 
 You must be authenticated with Cursor (`agent login` or set `CURSOR_API_KEY`).
+
+### Installing Claude Code CLI (alternative)
+
+Use this if you prefer Claude Code as the analysis backend (`--analyzer claude-code`). See the [official install docs](https://docs.claude.com/en/docs/claude-code/setup) for current install commands and authentication. Verify with:
+
+```bash
+claude --version
+```
+
+The monitor invokes Claude Code in headless `-p` mode with `--tools "Read,Grep,Glob"` and `--permission-mode plan`, so the agent has no ability to execute Bash or write files in the analysis workspace.
 
 ### Slack Configuration
 
@@ -128,7 +141,7 @@ python monitor.py --no-npm
 | `monitor.py` | **Main orchestrator** — poll PyPI + npm, diff, analyze, alert (parallel threads) |
 | `pypi_monitor.py` | Standalone PyPI changelog poller (used for exploration) |
 | `package_diff.py` | Download and diff two versions of any PyPI or npm package |
-| `analyze_diff.py` | Send a diff to Cursor Agent CLI, parse verdict |
+| `analyze_diff.py` | Send a diff to Cursor Agent CLI or Claude Code CLI, parse verdict |
 | `top_pypi_packages.py` | Fetch and list top N PyPI packages by download count |
 | `slack.py` | Slack API client (SendMessage, PostFile) |
 | `etc/slack.json` | Slack bot credentials |
@@ -147,7 +160,8 @@ Options:
   --interval SECS  Poll interval in seconds (default: 300)
   --once           Single pass over recent events, then exit
   --slack          Enable Slack alerts for malicious findings
-  --model MODEL    Override LLM model (default: composer-2-fast)
+  --model MODEL    Override LLM model (cursor default: composer-2-fast; claude-code: backend default)
+  --analyzer X     LLM backend: "cursor" (default) or "claude-code"
   --debug          Enable DEBUG logging (includes agent raw output)
 
 PyPI options:
@@ -209,11 +223,21 @@ python analyze_diff.py telnyx_diff.md
 # JSON output
 python analyze_diff.py telnyx_diff.md --json
 
-# Use a specific model
+# Use a specific Cursor model
 python analyze_diff.py telnyx_diff.md --model claude-4-opus
+
+# Use Claude Code CLI instead of Cursor
+python analyze_diff.py telnyx_diff.md --analyzer claude-code
+
+# Pin a Claude Code model
+python analyze_diff.py telnyx_diff.md --analyzer claude-code --model claude-sonnet-4-6
 ```
 
-Runs Cursor Agent CLI in `--mode ask` (read-only) with `--trust`. The agent reads the diff file and returns a structured verdict.
+Runs the chosen backend with read-only restrictions:
+- **Cursor:** `--mode ask --trust` (ask mode is read-only).
+- **Claude Code:** `--tools "Read,Grep,Glob" --permission-mode plan` (built-in tool universe restricted to read-only; plan mode blocks side effects).
+
+The agent reads the diff file and returns a structured verdict.
 
 Exit codes: `0` = benign, `1` = malicious, `2` = unknown/error.
 
@@ -292,8 +316,8 @@ Analysis summary (truncated):
 ## Limitations
 
 - Releases are analyzed sequentially within each ecosystem thread. During high release volume, there will be a processing backlog.
-- **Cursor Agent CLI required** — analysis depends on an active Cursor subscription and the `agent` CLI being authenticated.
-- **Sandbox mode** (filesystem isolation) is only available on macOS/Linux. On Windows, the agent runs in read-only `ask` mode but without OS-level sandboxing.
+- **An analyzer backend is required** — either Cursor Agent CLI (active Cursor subscription, `agent` authenticated) or Claude Code CLI (`claude` authenticated). Selected via `--analyzer`.
+- **Sandbox mode** (filesystem isolation) is only available on macOS/Linux for Cursor. On Windows, both backends run in read-only mode but without OS-level sandboxing — Claude Code's `--tools "Read,Grep,Glob" --permission-mode plan` is enforced inside the agent process, not by the OS.
 - **Watchlists are static** — loaded once at startup from the hugovk (PyPI) and download-counts (npm) datasets. Restart to refresh.
 - **npm _changes gap protection** — if the saved npm sequence falls more than 10,000 changes behind the registry head, the monitor resets to head to avoid a long catch-up. Releases during the gap are missed.
 

@@ -56,13 +56,25 @@ Persists the PyPI changelog serial and npm CouchDB sequence + epoch between rest
 
 ### LLM analysis (`analyze_diff.py`)
 
-Writes an `instructions.md` into the same workspace directory as the diff file, then runs:
+Writes an `instructions.md` into the same workspace directory as the diff file, then runs one of two backends, selected via `--analyzer {cursor,claude-code}` (default `cursor`). Both backends share the same `instructions.md` template; only the invocation differs.
+
+**Cursor Agent (default):**
 
 ```
 agent "Follow instructions.md" -p --mode ask --trust --workspace <dir> [--model <model>]
 ```
 
-The agent binary is located via `shutil.which("agent")` with a fallback to `~/AppData/Local/cursor-agent/agent.cmd` on Windows. Default model is `composer-2-fast`; override with `--model`.
+Binary located via `shutil.which("agent")` with a fallback to `~/AppData/Local/cursor-agent/agent.cmd` on Windows. Default model is `composer-2-fast`. Read-only behavior is enforced by `--mode ask --trust`.
+
+**Claude Code:**
+
+```
+claude -p "Follow instructions.md" --tools "Read,Grep,Glob" --permission-mode plan [--model <model>] (cwd=<dir>)
+```
+
+Binary located via `shutil.which("claude")` with Windows fallbacks to `~/.local/bin/claude.exe` and `~/AppData/Roaming/npm/claude.cmd`. Model is unset by default (lets Claude Code pick its default — typically a Sonnet variant); override with e.g. `--model claude-sonnet-4-6`. Read-only behavior is enforced by `--tools "Read,Grep,Glob"` (restricts the built-in tool universe — no Bash/Edit/Write) combined with `--permission-mode plan`. The diff under review may contain adversarial code, so the tool restriction is load-bearing — don't relax it.
+
+Both backends use a 300s subprocess timeout and treat any non-zero exit as `verdict=unknown`. `parse_verdict()` extracts the verdict from a `Verdict: malicious|benign` line in the stdout.
 
 ### Slack configuration
 
